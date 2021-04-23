@@ -4,17 +4,17 @@ Extract prometheus metrics from dashboard JSON and rules YAML
 
 ## Usage:
 
-### Parse rules configs in `DIR`:
+Parse rules configs in `DIR`
 ```
 mixin-metrics --dir=DIR rules
 ```
 
-### Parse dashboard JSON files in `DIR`:
+Parse dashboard JSON files in `DIR`
 ```
 mixin-metrics --dir=DIR dash 
 ```
 
-## TODO:
+## TODO
 
 TODO
 
