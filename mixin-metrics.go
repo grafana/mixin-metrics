@@ -17,7 +17,7 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
-// todo.. prob just operate on files
+// todo: files
 var (
 	app = kingpin.New("metrics parser", "parse metrics from json and yaml")
 	inputDir = app.Flag("dir", "input dir path").Required().String()
@@ -30,10 +30,9 @@ var (
 type Metrics struct {
 	Metrics        []string	`json:"metrics"`
 	ParseErrors    []string `json:"parse_errors"`
-	PromQlErrors   []string `json:"promql_errors"`
 }
 
-// todo...structs for dashboards
+// todo: dashboard structs https://github.com/grafana-tools/sdk/issues/130#issuecomment-797018658
 type RuleConfig struct {
         RuleGroups	[]RuleGroup	`yaml:"groups"`
 }
@@ -55,6 +54,19 @@ func ParseQuery(query string, metrics map[string]struct{}) error {
 
 	var parseError error
 
+	query = strings.ReplaceAll(query, `\"`, `"`)
+	query = strings.ReplaceAll(query, `\n`, ``)
+	query = strings.ReplaceAll(query, `$__interval`, "5m")
+	query = strings.ReplaceAll(query, `$__rate_interval`, "5m")
+	query = strings.ReplaceAll(query, `$interval`, "5m")
+	query = strings.ReplaceAll(query, `$resolution`, "5s")
+
+	// label_values 
+	if strings.Contains(query, "label_values"){
+		re := regexp.MustCompile(`label_values\(([a-zA-Z0-9_]+)`)
+		query = re.FindStringSubmatch(query)[1]
+	}
+
 	expr, err := parser.ParseExpr(query)
 	if err != nil {
 		parseError = errors.Wrapf(err, "promql query=%v", query)
@@ -69,37 +81,7 @@ func ParseQuery(query string, metrics map[string]struct{}) error {
 		return nil
 	})
 
-	return parseError
-
-}
-
-func ParseQueries(dirtyQueries []string)  (map[string]struct{}, []error) {
-
-	metrics := map[string]struct{}{}
-	parseErrors := []error{}
-
-	for _, query := range dirtyQueries {
-		query = strings.ReplaceAll(query, `\"`, `"`)
-		query = strings.ReplaceAll(query, `\n`, ``)
-		query = strings.ReplaceAll(query, `$__interval`, "5m")
-		query = strings.ReplaceAll(query, `$__rate_interval`, "5m")
-		query = strings.ReplaceAll(query, `$interval`, "5m")
-		query = strings.ReplaceAll(query, `$resolution`, "5s")
-
-		// label_values 
-		if strings.Contains(query, "label_values"){
-			re := regexp.MustCompile(`label_values\(([a-zA-Z0-9_]+)`)
-			query = re.FindStringSubmatch(query)[1]
-		}
-
-		err := ParseQuery(query, metrics)
-		if err != nil {
-			parseErrors = append(parseErrors, err)
-		}
-
-	}
-
-	return metrics, parseErrors
+	return nil
 }
 
 func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) error {
@@ -124,7 +106,7 @@ func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) 
 	return nil
 }
 
-func ParseDashboard(file *os.File) ([]string, []error) {
+func ParseDashboard(file *os.File, metrics map[string]struct{}) []error {
 
 	queries := make([]string, 0)
 	parseErrors := make([]error, 0)
@@ -138,28 +120,35 @@ func ParseDashboard(file *os.File) ([]string, []error) {
 	json.Unmarshal([]byte(bytes), &res)
 	err = ParseJq(&queries, res, ".templating.list[].query")
 	if err != nil {
-		parseErrors = append(parseErrors, err)
+		log.Fatalln(err)
 	}
 
-	err = ParseJq(&queries, res, ".panels[]?.targets[].expr")
+	err = ParseJq(&queries, res, ".panels[]?.targets[]?.expr")
 	if err != nil {
-		parseErrors = append(parseErrors, err)
+		log.Fatalln(err)
 	}
 
 	err =  ParseJq(&queries, res, ".rows[].panels[].targets[].expr")
 	if err != nil {
-		parseErrors = append(parseErrors, err)
+		log.Fatalln(err)
 	}
 
-	return queries, parseErrors
+	for _, query := range queries {
+		err := ParseQuery(query, metrics)
+		if err != nil {
+			err = errors.Wrapf(err, "file=%v", file.Name())
+			parseErrors = append(parseErrors, err)
+		}
+	}
+
+	return parseErrors
 
 }
 
 // todo: pull out defined rules separately
-func ParseRules(file *os.File)([]string, []error){
+func ParseRules(file *os.File, metrics map[string]struct{}) []error {
 
 	var conf RuleConfig
-	queries := make([]string, 0)
 	parseErrors := make([]error, 0)
 
 	rulesFile, err := ioutil.ReadAll(file)
@@ -175,22 +164,23 @@ func ParseRules(file *os.File)([]string, []error){
 	groups := conf.RuleGroups
 	for _, group := range groups {
 		for _, rule := range group.Rules {
-			queries = append(queries, rule.Expr)
+			err := ParseQuery(rule.Expr, metrics)
+			if err != nil {
+				parseErrors = append(parseErrors, err)
+			}
 		}
 	}
 
-	return queries, parseErrors
-
+	return parseErrors
 }
 
-func ParseDir(dir string, isRules bool) ([]string, []error) {
+func ParseDir(dir string, metrics map[string]struct{}, isRules bool) []error {
 
 	files, err := ioutil.ReadDir(dir)
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	queries := make([]string, 0)
 	errors := make([]error, 0)
 
 	for _, fileInfo := range files {
@@ -201,13 +191,9 @@ func ParseDir(dir string, isRules bool) ([]string, []error) {
 		}
 
 		if isRules {
-			parsedQueries, errs  := ParseRules(file)
-			queries = append(queries, parsedQueries...)
-			errors = append(errors, errs...)
+			errors = append(errors, ParseRules(file, metrics)...)
 		} else {
-			parsedQueries, errs := ParseDashboard(file)
-			queries = append(queries, parsedQueries...)
-			errors = append(errors, errs...)
+			errors = append(errors, ParseDashboard(file, metrics)...)
 		}
 
 		err = file.Close()
@@ -216,31 +202,23 @@ func ParseDir(dir string, isRules bool) ([]string, []error) {
 		}
 	}
 
-	return queries, errors
+	return errors
 
 }
 
 func main() {
 
-	queries := make([]string, 0)
+	metrics := map[string]struct{}{}
 	errors := make([]error, 0)
 
 	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
 
-	// parse out queries using jq or yaml
 	case dash.FullCommand():
-		parseQueries, parseErrors := ParseDir(*inputDir, false)
-		queries = append(queries, parseQueries...)
-		errors = append(errors, parseErrors...)
+		errors = append(errors, ParseDir(*inputDir, metrics, false)...)
 
 	case rules.FullCommand():
-		parseQueries, parseErrors := ParseDir(*inputDir, true)
-		queries = append(queries, parseQueries...)
-		errors = append(errors, parseErrors...)
+		errors = append(errors, ParseDir(*inputDir, metrics, true)...)
 	}
-
-	// parse out metrics from queries using promql parser
-	metrics, promqlParseErrors := ParseQueries(queries)
 
 	// is there a better way to do this (+ next 2 blocks)
 	keys := make([]string, 0, len(metrics))
@@ -249,21 +227,14 @@ func main() {
 	}
 	sort.Strings(keys)
 
-	parseErrStrings := make([]string, 0, len(errors))
+	errStrings := make([]string, 0, len(errors))
 	for _, err := range errors{
-		parseErrStrings  = append(parseErrStrings, err.Error())
+		errStrings  = append(errStrings, err.Error())
 	}
 
-	promqlErrStrings := make([]string, 0, len(promqlParseErrors))
-	for _, err := range promqlParseErrors{
-		promqlErrStrings = append(promqlErrStrings, err.Error())
-	}
-
-	// output... todo: per dashboard
 	output := Metrics{
 		Metrics: keys,
-		ParseErrors: parseErrStrings,
-		PromQlErrors: promqlErrStrings,
+		ParseErrors: errStrings,
 	}
 
 	out, err := json.MarshalIndent(output, "", "  ")
