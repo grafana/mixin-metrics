@@ -17,7 +17,6 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
-// todo: files
 var (
 	app = kingpin.New("metrics parser", "parse metrics from json and yaml")
 	inputDir = app.Flag("dir", "input dir path").Required().String()
@@ -27,7 +26,12 @@ var (
 	rules = app.Command("rules", "parse yaml rules config in dir")
 )
 
-type Metrics struct {
+type MetricsDir struct {
+	MetricsFiles	[]MetricsFile	`json:"metricsfiles"`
+}
+
+type MetricsFile struct {
+	Filename       string   `json:"filename"`
 	Metrics        []string	`json:"metrics"`
 	ParseErrors    []string `json:"parse_errors"`
 }
@@ -48,6 +52,28 @@ type Rule struct {
 	Expr        string            `yaml:"expr"`
 	Labels      map[string]string `yaml:"labels,omitempty"`
 	Annotations map[string]string `yaml:"annotations,omitempty"`
+}
+
+func NewMetricsFile(fn string, metrics map[string]struct{}, errs []error) MetricsFile {
+
+	keys := make([]string, 0, len(metrics))
+	for k := range metrics {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	errStrings := make([]string, 0, len(errs))
+	for _, err := range errs {
+		errStrings  = append(errStrings, err.Error())
+	}
+
+	metricsFile := MetricsFile{
+		Filename: fn,
+		Metrics: keys,
+		ParseErrors: errStrings,
+	}
+
+	return metricsFile
 }
 
 func ParseQuery(query string, metrics map[string]struct{}) error {
@@ -106,10 +132,11 @@ func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) 
 	return nil
 }
 
-func ParseDashboard(file *os.File, metrics map[string]struct{}) []error {
+func ParseDashboard(file *os.File) MetricsFile {
 
 	queries := make([]string, 0)
-	parseErrors := make([]error, 0)
+	metrics := map[string]struct{}{}
+	errors := make([]error, 0)
 	res := map[string]interface{}{}
 
 	bytes, err := ioutil.ReadAll(file)
@@ -136,20 +163,22 @@ func ParseDashboard(file *os.File, metrics map[string]struct{}) []error {
 	for _, query := range queries {
 		err := ParseQuery(query, metrics)
 		if err != nil {
-			err = errors.Wrapf(err, "file=%v", file.Name())
-			parseErrors = append(parseErrors, err)
+			errors = append(errors, err)
 		}
 	}
 
-	return parseErrors
+	metricsFile := NewMetricsFile(file.Name(), metrics, errors)
+	return metricsFile
 
 }
 
 // todo: pull out defined rules separately
-func ParseRules(file *os.File, metrics map[string]struct{}) []error {
+func ParseRules(file *os.File) MetricsFile {
+
+	metrics := map[string]struct{}{}
+	errors := make([]error, 0)
 
 	var conf RuleConfig
-	parseErrors := make([]error, 0)
 
 	rulesFile, err := ioutil.ReadAll(file)
 	if err != nil {
@@ -166,22 +195,26 @@ func ParseRules(file *os.File, metrics map[string]struct{}) []error {
 		for _, rule := range group.Rules {
 			err := ParseQuery(rule.Expr, metrics)
 			if err != nil {
-				parseErrors = append(parseErrors, err)
+				errors = append(errors, err)
 			}
 		}
 	}
 
-	return parseErrors
+	metricsFile := NewMetricsFile(file.Name(), metrics, errors)
+
+	return metricsFile
 }
 
-func ParseDir(dir string, metrics map[string]struct{}, isRules bool) []error {
+func ParseDir(dir string, isRules bool) MetricsDir {
 
 	files, err := ioutil.ReadDir(dir)
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	errors := make([]error, 0)
+	metricsDir := MetricsDir{
+		MetricsFiles: make([]MetricsFile, 0),
+	}
 
 	for _, fileInfo := range files {
 		fmt.Println("Parsing: ", fileInfo.Name())
@@ -191,9 +224,9 @@ func ParseDir(dir string, metrics map[string]struct{}, isRules bool) []error {
 		}
 
 		if isRules {
-			errors = append(errors, ParseRules(file, metrics)...)
+			metricsDir.MetricsFiles = append(metricsDir.MetricsFiles, ParseRules(file))
 		} else {
-			errors = append(errors, ParseDashboard(file, metrics)...)
+			metricsDir.MetricsFiles = append(metricsDir.MetricsFiles, ParseDashboard(file))
 		}
 
 		err = file.Close()
@@ -202,39 +235,21 @@ func ParseDir(dir string, metrics map[string]struct{}, isRules bool) []error {
 		}
 	}
 
-	return errors
+	return metricsDir
 
 }
 
 func main() {
 
-	metrics := map[string]struct{}{}
-	errors := make([]error, 0)
+	output := MetricsDir{}
 
 	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
 
 	case dash.FullCommand():
-		errors = append(errors, ParseDir(*inputDir, metrics, false)...)
+		output = ParseDir(*inputDir, false)
 
 	case rules.FullCommand():
-		errors = append(errors, ParseDir(*inputDir, metrics, true)...)
-	}
-
-	// is there a better way to do this (+ next 2 blocks)
-	keys := make([]string, 0, len(metrics))
-	for k := range metrics {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	errStrings := make([]string, 0, len(errors))
-	for _, err := range errors{
-		errStrings  = append(errStrings, err.Error())
-	}
-
-	output := Metrics{
-		Metrics: keys,
-		ParseErrors: errStrings,
+		output = ParseDir(*inputDir, true)
 	}
 
 	out, err := json.MarshalIndent(output, "", "  ")
