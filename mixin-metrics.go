@@ -1,3 +1,5 @@
+
+// parses Prom metrics from dashboard JSON and YAML rules
 package main
 
 import (
@@ -17,8 +19,10 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
+// usage:
+// mixin-metrics --dir=DIR (--out=OUT_DIR --print) [dash | rules] 
 var (
-	app = kingpin.New("metrics parser", "parse metrics from json and yaml")
+	app = kingpin.New("prom metrics parser", "parse metrics from json and yaml")
 	inputDir = app.Flag("dir", "input dir path").Required().String()
 	outputFile = app.Flag("out", "metrics output file").Default("metrics_out.json").String()
 	printMetrics = app.Flag("print", "print all metrics").Bool()
@@ -33,11 +37,14 @@ type MetricsDir struct {
 
 type MetricsFile struct {
 	Filename       string   `json:"filename"`
+	// slice of prom metrics in file
 	Metrics        []string	`json:"metrics"`
+	// promql parse errors in file
 	ParseErrors    []string `json:"parse_errors"`
 }
 
 // todo: dashboard structs https://github.com/grafana-tools/sdk/issues/130#issuecomment-797018658
+// using jq for now
 type RuleConfig struct {
         RuleGroups	[]RuleGroup	`yaml:"groups"`
 }
@@ -55,6 +62,7 @@ type Rule struct {
 	Annotations map[string]string `yaml:"annotations,omitempty"`
 }
 
+// create MetricsFile struct
 func NewMetricsFile(fn string, metrics map[string]struct{}, errs []error) MetricsFile {
 
 	keys := make([]string, 0, len(metrics))
@@ -77,6 +85,7 @@ func NewMetricsFile(fn string, metrics map[string]struct{}, errs []error) Metric
 	return metricsFile
 }
 
+// use promql parser on a query to extract metrics
 func ParseQuery(query string, metrics map[string]struct{}) error {
 
 	query = strings.ReplaceAll(query, `\"`, `"`)
@@ -109,6 +118,7 @@ func ParseQuery(query string, metrics map[string]struct{}) error {
 	return nil
 }
 
+// use jq on a file to extract prom queries
 func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) error {
 
 	query, err := gojq.Parse(jqExpr)
@@ -131,6 +141,7 @@ func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) 
 	return nil
 }
 
+// parses through a dashboard to extract queries, and then metrics from queries
 func ParseDashboard(file *os.File) (*MetricsFile, error) {
 
 	queries := make([]string, 0)
@@ -167,6 +178,7 @@ func ParseDashboard(file *os.File) (*MetricsFile, error) {
 }
 
 // todo: separate rules and raw metrics
+// parses through a rules file and extracts queries, and then metrics from queries
 func ParseRules(file *os.File) (*MetricsFile, error) {
 
 	metrics := map[string]struct{}{}
@@ -199,6 +211,7 @@ func ParseRules(file *os.File) (*MetricsFile, error) {
 	return &metricsFile, nil
 }
 
+// iterates over all rules/dash files in dir
 func ParseDir(dir string, isRules bool) (*MetricsDir, error) {
 
 	files, err := ioutil.ReadDir(dir)
@@ -241,6 +254,7 @@ func ParseDir(dir string, isRules bool) (*MetricsDir, error) {
 
 }
 
+// write out MetricsDir to outputFile
 func (md *MetricsDir) WriteOut(outputFile string) error {
 	out, err := json.MarshalIndent(*md, "", "  ")
 	if err != nil {
@@ -254,6 +268,7 @@ func (md *MetricsDir) WriteOut(outputFile string) error {
 	return nil
 }
 
+// prints parsed metrics in relabel_configs form
 func (md *MetricsDir) PrintMetrics() {
 
 	metrics := map[string]struct{}{}
@@ -272,7 +287,7 @@ func (md *MetricsDir) PrintMetrics() {
 	fmt.Println(strings.Join(keys, " | "))
 }
 
-// todo: running rules on dash dir doesn't fail?
+// todo: running `rules` on a dash dir doesn't fail? :(
 func main() {
 
 	var output *MetricsDir
