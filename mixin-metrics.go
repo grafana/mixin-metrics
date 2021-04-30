@@ -21,6 +21,7 @@ var (
 	app = kingpin.New("metrics parser", "parse metrics from json and yaml")
 	inputDir = app.Flag("dir", "input dir path").Required().String()
 	outputFile = app.Flag("out", "metrics output file").Default("metrics_out.json").String()
+	printMetrics = app.Flag("print", "print all metrics").Bool()
 
 	dash = app.Command("dash", "parse json dashboards in dir")
 	rules = app.Command("rules", "parse yaml rules config in dir")
@@ -78,8 +79,6 @@ func NewMetricsFile(fn string, metrics map[string]struct{}, errs []error) Metric
 
 func ParseQuery(query string, metrics map[string]struct{}) error {
 
-	var parseError error
-
 	query = strings.ReplaceAll(query, `\"`, `"`)
 	query = strings.ReplaceAll(query, `\n`, ``)
 	query = strings.ReplaceAll(query, `$__interval`, "5m")
@@ -95,9 +94,9 @@ func ParseQuery(query string, metrics map[string]struct{}) error {
 
 	expr, err := parser.ParseExpr(query)
 	if err != nil {
-		parseError = errors.Wrapf(err, "promql query=%v", query)
+		err = errors.Wrapf(err, "promql query=%v", query)
 		log.Debugln("msg", "promql parse error", "err", err, "query", query)
-		return parseError
+		return err
 	}
 
 	parser.Inspect(expr, func(node parser.Node, path []parser.Node) error {
@@ -132,7 +131,7 @@ func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) 
 	return nil
 }
 
-func ParseDashboard(file *os.File) MetricsFile {
+func ParseDashboard(file *os.File) (*MetricsFile, error) {
 
 	queries := make([]string, 0)
 	metrics := map[string]struct{}{}
@@ -141,39 +140,34 @@ func ParseDashboard(file *os.File) MetricsFile {
 
 	bytes, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
 	json.Unmarshal([]byte(bytes), &res)
-	err = ParseJq(&queries, res, ".templating.list[].query")
-	if err != nil {
-		log.Fatalln(err)
+	if err := ParseJq(&queries, res, ".templating.list[].query"); err != nil {
+		return nil, err
 	}
 
-	err = ParseJq(&queries, res, ".panels[]?.targets[]?.expr")
-	if err != nil {
-		log.Fatalln(err)
+	if err := ParseJq(&queries, res, ".panels[]?.targets[]?.expr"); err != nil {
+		return nil, err
 	}
 
-	err =  ParseJq(&queries, res, ".rows[].panels[].targets[].expr")
-	if err != nil {
-		log.Fatalln(err)
+	if err := ParseJq(&queries, res, ".rows[].panels[].targets[].expr"); err != nil {
+		return nil, err
 	}
 
 	for _, query := range queries {
-		err := ParseQuery(query, metrics)
-		if err != nil {
+		if err := ParseQuery(query, metrics); err != nil {
 			errors = append(errors, err)
 		}
 	}
 
 	metricsFile := NewMetricsFile(file.Name(), metrics, errors)
-	return metricsFile
-
+	return &metricsFile, nil
 }
 
-// todo: pull out defined rules separately
-func ParseRules(file *os.File) MetricsFile {
+// todo: separate rules and raw metrics
+func ParseRules(file *os.File) (*MetricsFile, error) {
 
 	metrics := map[string]struct{}{}
 	errors := make([]error, 0)
@@ -182,12 +176,12 @@ func ParseRules(file *os.File) MetricsFile {
 
 	rulesFile, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
 	err = yaml.Unmarshal(rulesFile, &conf)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
 	groups := conf.RuleGroups
@@ -202,14 +196,14 @@ func ParseRules(file *os.File) MetricsFile {
 
 	metricsFile := NewMetricsFile(file.Name(), metrics, errors)
 
-	return metricsFile
+	return &metricsFile, nil
 }
 
-func ParseDir(dir string, isRules bool) MetricsDir {
+func ParseDir(dir string, isRules bool) (*MetricsDir, error) {
 
 	files, err := ioutil.ReadDir(dir)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
 	metricsDir := MetricsDir{
@@ -220,45 +214,91 @@ func ParseDir(dir string, isRules bool) MetricsDir {
 		fmt.Println("Parsing: ", fileInfo.Name())
 		file, err := os.Open(dir + "/" + fileInfo.Name())
 		if err != nil {
-			log.Fatalln(err)
+			return nil, err
 		}
 
 		if isRules {
-			metricsDir.MetricsFiles = append(metricsDir.MetricsFiles, ParseRules(file))
+			metricsFile, err := ParseRules(file)
+			if err != nil {
+				return nil, err
+			}
+			metricsDir.MetricsFiles = append(metricsDir.MetricsFiles, *metricsFile)
 		} else {
-			metricsDir.MetricsFiles = append(metricsDir.MetricsFiles, ParseDashboard(file))
+			metricsFile, err := ParseDashboard(file)
+			if err != nil {
+				return nil, err
+			}
+			metricsDir.MetricsFiles = append(metricsDir.MetricsFiles, *metricsFile)
 		}
 
 		err = file.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &metricsDir, nil
+
+}
+
+func (md *MetricsDir) WriteOut(outputFile string) error {
+	out, err := json.MarshalIndent(*md, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := ioutil.WriteFile(outputFile, out, os.FileMode(int(0666))); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (md *MetricsDir) PrintMetrics() {
+
+	metrics := map[string]struct{}{}
+
+	for _, metricsFile := range md.MetricsFiles {
+		for _, metric := range metricsFile.Metrics{
+			metrics[metric] = struct{}{}
+		}
+	}
+
+	keys := make([]string, 0, len(metrics))
+	for k := range metrics {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Println(strings.Join(keys, " | "))
+}
+
+// todo: running rules on dash dir doesn't fail?
+func main() {
+
+	var output *MetricsDir
+	var err error
+
+	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
+
+	case dash.FullCommand():
+		output, err = ParseDir(*inputDir, false)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+	case rules.FullCommand():
+		output, err = ParseDir(*inputDir, true)
 		if err != nil {
 			log.Fatalln(err)
 		}
 	}
 
-	return metricsDir
-
-}
-
-func main() {
-
-	output := MetricsDir{}
-
-	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
-
-	case dash.FullCommand():
-		output = ParseDir(*inputDir, false)
-
-	case rules.FullCommand():
-		output = ParseDir(*inputDir, true)
+	if *printMetrics {
+		output.PrintMetrics()
+		return
 	}
 
-	out, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
+	if err := output.WriteOut(*outputFile); err != nil {
 		log.Fatalln(err)
 	}
-
-	if err := ioutil.WriteFile(*outputFile, out, os.FileMode(int(0666))); err != nil {
-		log.Fatalln(err)
-	}
-
 }
