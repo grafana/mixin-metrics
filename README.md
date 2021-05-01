@@ -21,6 +21,6 @@ mixin-metrics --dir=DIR --print dash
 
 ## TODO
 
-- [] fail fast if parsing rules/dash with wrong flag
-- [] license, move to graf repo, etc.
-- [] longer tutorial and incoporate in metrics reduction docs
+- [ ] fail fast if parsing rules/dash with wrong flag
+- [ ] license, move to graf repo, etc.
+- [ ] longer tutorial and incoporate in metrics reduction docs
