@@ -35,3 +35,4 @@ Use this output with `relabel_config` to `drop` or `keep` needed metrics. See [R
 - [ ] better docs
 - [ ] dashboard structs (no jq)
 - [ ] tests
+- [ ] binaries
