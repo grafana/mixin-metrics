@@ -177,10 +177,11 @@ func ParseDashboard(file *os.File) (*MetricsFile, error) {
 
 	json.Unmarshal([]byte(bytes), &res)
 
+	// TODO: structs for dashboards
 	exprs := []string{
 		".templating.list[].query",
 		".panels[]?.targets[]?.expr",
-		".rows[].panels[].targets[].expr",
+		".rows[]?.panels[]?.targets[]?.expr",
 	}
 	for _, expr := range exprs {
 		if err := ParseJq(&queries, res, expr); err != nil {
@@ -229,9 +230,15 @@ func ParseQuery(query string, metrics map[string]struct{}) error {
 	query = strings.ReplaceAll(query, `$interval`, "5m")
 	query = strings.ReplaceAll(query, `$resolution`, "5s")
 
+	// TODO: cleaner way
 	// label_values
 	if strings.Contains(query, "label_values") {
 		re := regexp.MustCompile(`label_values\(([a-zA-Z0-9_]+)`)
+		query = re.FindStringSubmatch(query)[1]
+	}
+	// query_result
+	if strings.Contains(query, "query_result") {
+		re := regexp.MustCompile(`query_result\((.+)\)`)
 		query = re.FindStringSubmatch(query)[1]
 	}
 
