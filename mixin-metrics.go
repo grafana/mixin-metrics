@@ -177,15 +177,16 @@ func ParseDashboard(file *os.File) (*MetricsFile, error) {
 
 	json.Unmarshal([]byte(bytes), &res)
 
-	// TODO: structs for dashboards
+	// TODO: structs for dashboards - deprecate jq
 	exprs := []string{
-		".templating.list[].query",
+		".templating.list[]?.query",
+		".templating.list[]?.query.query",
 		".panels[]?.targets[]?.expr",
 		".rows[]?.panels[]?.targets[]?.expr",
 	}
 	for _, expr := range exprs {
 		if err := ParseJq(&queries, res, expr); err != nil {
-			return nil, err
+			errors = append(errors, err)
 		}
 	}
 
@@ -212,10 +213,12 @@ func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) 
 		if !ok {
 			break
 		}
-		if err, ok := v.(error); ok {
+		queryStr, ok := v.(string)
+		if !ok {
+			err := fmt.Errorf("jq parsing expr failed: %v", jqExpr)
 			return err
 		}
-		*queries = append(*queries, v.(string))
+		*queries = append(*queries, queryStr)
 	}
 
 	return nil
@@ -223,14 +226,16 @@ func ParseJq(queries *[]string, jsonData map[string]interface{}, jqExpr string) 
 
 // use promql parser on a query to extract metrics
 func ParseQuery(query string, metrics map[string]struct{}) error {
+	// TODO: clean this up
 	query = strings.ReplaceAll(query, `\"`, `"`)
 	query = strings.ReplaceAll(query, `\n`, ``)
 	query = strings.ReplaceAll(query, `$__interval`, "5m")
 	query = strings.ReplaceAll(query, `$__rate_interval`, "5m")
 	query = strings.ReplaceAll(query, `$interval`, "5m")
 	query = strings.ReplaceAll(query, `$resolution`, "5s")
+	query = strings.ReplaceAll(query, `$__range`, "5m")
 
-	// TODO: cleaner way
+	// TODO: clean this up
 	// label_values
 	if strings.Contains(query, "label_values") {
 		re := regexp.MustCompile(`label_values\(([a-zA-Z0-9_]+)`)
