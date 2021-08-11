@@ -1,5 +1,5 @@
 
-⚠️ **This project is deprecated. Please see [cortextool analyse](https://github.com/grafana/cortex-tools#analyse) which provides the same features** ⚠️
+⚠️ **This project has been deprecated. Please see [cortextool analyse](https://github.com/grafana/cortex-tools#analyse) which provides the same features** ⚠️
 
 # mixin-metrics
 ![License](https://img.shields.io/github/license/hjet/mixin-metrics?color=blue)
